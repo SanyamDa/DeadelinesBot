@@ -56,6 +56,7 @@ Welcome! I can help you manage your deadlines.
 **Available Commands:**
 • `/add` - Add a new deadline
 • `/view` - View deadlines by category
+• `/delete` - Delete deadlines by category
 • `/help` - Show this help message
 
 **Categories available:**
@@ -93,9 +94,16 @@ Use `/view` followed by a category:
 • `/view other` - Show other deadlines
 • `/view all` - Show all deadlines
 
+**Deleting Deadlines:**
+Use `/delete` followed by a category:
+• `/delete university` - Delete university deadlines
+• `/delete ia` - Delete IA deadlines
+• `/delete all` - Delete from any category
+
 **Examples:**
 • `/add` - Start adding a deadline
 • `/view university` - View university deadlines
+• `/delete ia` - Delete IA deadlines
 • `/view all` - View all deadlines
     """
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -134,6 +142,101 @@ async def view_deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     category = args[0].lower()
     await show_deadlines_by_category(update, category)
+
+async def delete_deadlines(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete deadlines by category"""
+    args = context.args
+    
+    if not args:
+        # Show category selection buttons for deletion
+        keyboard = []
+        for i in range(0, len(CATEGORIES), 2):
+            row = []
+            row.append(InlineKeyboardButton(CATEGORIES[i].upper(), callback_data=f"delete_{CATEGORIES[i]}"))
+            if i + 1 < len(CATEGORIES):
+                row.append(InlineKeyboardButton(CATEGORIES[i + 1].upper(), callback_data=f"delete_{CATEGORIES[i + 1]}"))
+            keyboard.append(row)
+        
+        keyboard.append([InlineKeyboardButton("ALL CATEGORIES", callback_data="delete_all")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "🗑️ Select a category to delete deadlines from:",
+            reply_markup=reply_markup
+        )
+        return
+    
+    category = args[0].lower()
+    await show_deadlines_for_deletion(update, category)
+
+async def show_deadlines_for_deletion(update, category):
+    """Show deadlines for deletion selection"""
+    deadlines = load_deadlines()
+    
+    if category == 'all':
+        all_deadlines = []
+        for cat in deadlines:
+            for i, deadline in enumerate(deadlines[cat]):
+                deadline['category'] = cat
+                deadline['index'] = i
+                all_deadlines.append(deadline)
+        filtered_deadlines = all_deadlines
+    else:
+        if category not in CATEGORIES:
+            await update.message.reply_text(
+                f"❌ Invalid category '{category}'. Available categories:\n" +
+                ", ".join(CATEGORIES) + ", all"
+            )
+            return
+        
+        filtered_deadlines = deadlines.get(category, [])
+        for i, deadline in enumerate(filtered_deadlines):
+            deadline['category'] = category
+            deadline['index'] = i
+    
+    if not filtered_deadlines:
+        category_text = "any category" if category == 'all' else f"'{category}' category"
+        await update.message.reply_text(f"📭 No deadlines found in {category_text}.")
+        return
+    
+    # Sort deadlines by date
+    try:
+        filtered_deadlines.sort(key=lambda x: datetime.strptime(x['date'], '%Y-%m-%d'))
+    except:
+        pass
+    
+    # Create buttons for each deadline
+    keyboard = []
+    message = f"🗑️ **Select deadline(s) to delete" + (f" - {category.upper()}" if category != 'all' else "") + ":**\n\n"
+    
+    for deadline in filtered_deadlines:
+        try:
+            due_date = datetime.strptime(deadline['date'], '%Y-%m-%d')
+            days_left = (due_date - datetime.now()).days
+            
+            if days_left < 0:
+                status = f"⚠️ OVERDUE"
+            elif days_left == 0:
+                status = "🔥 DUE TODAY"
+            elif days_left <= 3:
+                status = f"🚨 {days_left} days"
+            else:
+                status = f"📅 {days_left} days"
+        except:
+            status = "📅"
+        
+        category_tag = f" [{deadline.get('category', '').upper()}]" if category == 'all' else ""
+        message += f"• **{deadline['title']}**{category_tag}\n"
+        message += f"  📅 {deadline['date']} - {status}\n\n"
+        
+        # Create callback data with category and index
+        callback_data = f"del_{deadline['category']}_{deadline['index']}"
+        keyboard.append([InlineKeyboardButton(f"🗑️ {deadline['title'][:30]}...", callback_data=callback_data)])
+    
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def show_deadlines_by_category(update, category):
     """Show deadlines for a specific category"""
@@ -201,6 +304,41 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if query.data.startswith('view_'):
         category = query.data.replace('view_', '')
         await show_deadlines_by_category(query, category)
+    elif query.data.startswith('delete_') and not query.data.startswith('del_'):
+        # Handle category selection for deletion
+        category = query.data.replace('delete_', '')
+        await show_deadlines_for_deletion(query, category)
+    elif query.data.startswith('del_'):
+        # Handle individual deadline deletion
+        parts = query.data.split('_')
+        if len(parts) >= 3:
+            category = parts[1]
+            try:
+                index = int(parts[2])
+                
+                # Delete the deadline
+                deadlines = load_deadlines()
+                if category in deadlines and 0 <= index < len(deadlines[category]):
+                    deleted_deadline = deadlines[category].pop(index)
+                    
+                    # Remove category if empty
+                    if not deadlines[category]:
+                        del deadlines[category]
+                    
+                    save_deadlines(deadlines)
+                    
+                    await query.edit_message_text(
+                        f"✅ Deadline deleted successfully!\n\n"
+                        f"**Deleted:** {deleted_deadline['title']}\n"
+                        f"**Due Date:** {deleted_deadline['date']}\n"
+                        f"**Category:** {category.upper()}"
+                    )
+                else:
+                    await query.edit_message_text("❌ Error: Deadline not found or already deleted.")
+            except (ValueError, IndexError):
+                await query.edit_message_text("❌ Error: Invalid deadline selection.")
+    elif query.data == 'delete_cancel':
+        await query.edit_message_text("❌ Deletion cancelled.")
     elif query.data.startswith('category_'):
         # Handle category selection for adding deadline
         category = query.data.replace('category_', '')
@@ -294,6 +432,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("add", add_deadline))
     application.add_handler(CommandHandler("view", view_deadlines))
+    application.add_handler(CommandHandler("delete", delete_deadlines))
     application.add_handler(CallbackQueryHandler(handle_callback_query))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
